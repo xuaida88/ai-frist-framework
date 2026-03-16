@@ -1,31 +1,36 @@
 import 'reflect-metadata';
 import { Service, Autowired } from '@ai-partner-x/aiko-boot';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken'; // 只用于refresh token，access token使用安全组件
+import { JwtStrategy } from '@ai-partner-x/aiko-boot-starter-security';
 import { UserMapper } from '../mapper/user.mapper.js';
 import { UserRoleMapper } from '../mapper/user-role.mapper.js';
 import { RoleMapper } from '../mapper/role.mapper.js';
 import { RoleMenuMapper } from '../mapper/role-menu.mapper.js';
 import { MenuMapper } from '../mapper/menu.mapper.js';
+import type { User } from '@ai-partner-x/aiko-boot-starter-security';
 
 import type { LoginDto, LoginResultDto } from '../dto/auth.dto.js';
-import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../utils/jwt.util.js';
 
 @Service()
 export class AuthService {
-  @Autowired()
+  @Autowired(UserMapper)
   private userMapper!: UserMapper;
 
-  @Autowired()
+  @Autowired(UserRoleMapper)
   private userRoleMapper!: UserRoleMapper;
 
-  @Autowired()
+  @Autowired(RoleMapper)
   private roleMapper!: RoleMapper;
 
-  @Autowired()
+  @Autowired(RoleMenuMapper)
   private roleMenuMapper!: RoleMenuMapper;
 
-  @Autowired()
+  @Autowired(MenuMapper)
   private menuMapper!: MenuMapper;
+
+  @Autowired(JwtStrategy)
+  private jwtStrategy!: JwtStrategy;
 
   async login(dto: LoginDto): Promise<LoginResultDto> {
     const user = await this.userMapper.selectByUsername(dto.username);
@@ -41,23 +46,44 @@ export class AuthService {
     const roles = userRolesAndPerms.roles;
     const permissions = userRolesAndPerms.permissions;
 
-    const payload = { userId: user.id, username: user.username, roles, permissions };
+    // 使用框架的User类型，包含roles和permissions字段
+    const frameworkUser = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      roles: roles.map(function(r) { return { id: 0, name: r }; }), // 转换为框架格式
+      permissions: permissions, // 使用字符串数组格式
+    };
+
+    // 生成JWT token - 使用安全组件的JwtStrategy
+    const accessToken = await this.jwtStrategy.generateToken(frameworkUser as User);
+    const refreshToken = this.generateRefreshToken(user.id);
+
     return {
-      accessToken: signAccessToken(payload),
-      refreshToken: signRefreshToken({ userId: user.id }),
+      accessToken: accessToken,
+      refreshToken: refreshToken,
       userInfo: { id: user.id, username: user.username, realName: user.realName, email: user.email, roles, permissions },
     };
   }
 
   async refreshToken(refreshToken: string): Promise<{ accessToken: string }> {
-    const payload = verifyRefreshToken(refreshToken);
+    const payload = this.verifyRefreshToken(refreshToken);
     const user = await this.userMapper.selectById(payload.userId);
     if (!user || user.status === 0) throw new Error('用户不存在或已禁用');
 
     const userRolesAndPerms = await this.getUserRolesAndPermissions(user.id);
     const roles = userRolesAndPerms.roles;
     const permissions = userRolesAndPerms.permissions;
-    const accessToken = signAccessToken({ userId: user.id, username: user.username, roles, permissions });
+
+    const frameworkUser = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      roles: roles.map(function(r) { return { id: 0, name: r }; }),
+      permissions: permissions,
+    };
+
+    const accessToken = await this.jwtStrategy.generateToken(frameworkUser as User);
     return { accessToken };
   }
 
@@ -74,6 +100,26 @@ export class AuthService {
       }
     }
     return { ...safeUser, roles, permissions };
+  }
+
+  async getCurrentUserByToken(accessToken: string): Promise<LoginResultDto['userInfo']> {
+    try {
+      // 使用安全组件的JwtStrategy验证token
+      const user = await this.jwtStrategy.validate(accessToken);
+      if (!user) {
+        throw new Error('Invalid token');
+      }
+      return this.getUserInfo(user.id);
+    } catch (error: any) {
+      if (error.name === 'TokenExpiredError') {
+        throw new Error('Token has expired');
+      } else if (error.name === 'JsonWebTokenError') {
+        throw new Error('Invalid token: ' + error.message);
+      } else if (error.name === 'NotBeforeError') {
+        throw new Error('Token not active yet');
+      }
+      throw error;
+    }
   }
 
   private async getUserRolesAndPermissions(userId: number) {
@@ -101,6 +147,19 @@ export class AuthService {
       }
     }
     return { roles: [...new Set(roles)], permissions: [...new Set(permissions)] };
+  }
+
+  // Refresh token 方法（使用独立的secret，与安全组件的JWT分离）
+  private generateRefreshToken(userId: number): string {
+    const secret = process.env.JWT_REFRESH_SECRET || 'ai-first-refresh-secret-change-in-production';
+    const expiresIn = '7d';
+
+    return jwt.sign({ userId }, secret, { expiresIn } as any);
+  }
+
+  private verifyRefreshToken(token: string): any {
+    const secret = process.env.JWT_REFRESH_SECRET || 'ai-first-refresh-secret-change-in-production';
+    return jwt.verify(token, secret);
   }
 }
 

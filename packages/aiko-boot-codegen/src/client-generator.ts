@@ -146,12 +146,11 @@ function parseController(filePath: string): ControllerInfo | null {
   return { className, basePath, methods, imports };
 }
 
-function generateControllerCode(info: ControllerInfo, entityFile: string, dtoFile: string): string {
+function generateControllerCode(info: ControllerInfo, entityFile: string): string {
   const methodsCode = info.methods.map((m) => {
     const paramsStr = m.params.map((p) => `${p.name}: ${p.type}`).join(', ');
-    
     let urlCode = `\`\${this.baseUrl}/api${info.basePath}${m.path}\``;
-    
+
     for (const p of m.params) {
       if (p.decorator === 'PathVariable' && p.decoratorArg) {
         urlCode = urlCode.replace(`:${p.decoratorArg}`, `\${${p.name}}`);
@@ -161,10 +160,20 @@ function generateControllerCode(info: ControllerInfo, entityFile: string, dtoFil
     const bodyParam = m.params.find((p) => p.decorator === 'RequestBody');
     const bodyCode = bodyParam ? `body: JSON.stringify(${bodyParam.name}),` : '';
 
+    // 处理 @RequestHeader 装饰器
+    const headerParams = m.params.filter((p) => p.decorator === 'RequestHeader' && p.decoratorArg);
+    let headerCode = '';
+    if (headerParams.length > 0) {
+      const headerEntries = headerParams.map((p) => `'${p.decoratorArg}': ${p.name}`);
+      headerCode = `headers: { 'Content-Type': 'application/json', ${headerEntries.join(', ')} },`;
+    } else {
+      headerCode = `headers: { 'Content-Type': 'application/json' },`;
+    }
+
     return `  async ${m.name}(${paramsStr}): ${m.returnType} {
     const res = await fetch(${urlCode}, {
       method: '${m.httpMethod}',
-      headers: { 'Content-Type': 'application/json' },
+      ${headerCode}
       ${bodyCode}
     });
     const json = await res.json() as { success: boolean; data?: ${m.innerType}; error?: string };
@@ -176,9 +185,13 @@ function generateControllerCode(info: ControllerInfo, entityFile: string, dtoFil
   // 生成 import 语句
   const entityImports: string[] = [];
   const dtoImports: string[] = [];
-  
+
   info.imports.forEach((type) => {
-    if (type.endsWith('Dto')) {
+    // 内联类型（如 LoginResultDto['userInfo']）不需要单独导入，因为它们引用已导入的 DTO 类型
+    if (type.includes('[') && type.includes(']')) {
+      // 跳过内联类型，避免尝试从不存在的 entity 文件导入
+      return;
+    } else if (type.endsWith('Dto')) {
       dtoImports.push(type);
     } else {
       entityImports.push(type);
@@ -190,7 +203,7 @@ function generateControllerCode(info: ControllerInfo, entityFile: string, dtoFil
     importStatements += `import type { ${entityImports.join(', ')} } from './${entityFile.replace('.ts', '')}';\n`;
   }
   if (dtoImports.length > 0) {
-    importStatements += `import type { ${dtoImports.join(', ')} } from './${dtoFile.replace('.ts', '')}';\n`;
+    importStatements += `import type { ${dtoImports.join(', ')} } from './index';\n`;
   }
 
   return `${importStatements}
@@ -212,6 +225,7 @@ function generateInterface(filePath: string, type: 'entity' | 'dto'): string {
   const result: string[] = [];
 
   ts.forEachChild(sourceFile, (node) => {
+    // 处理 class 声明
     if (ts.isClassDeclaration(node) && node.name) {
       const className = node.name.text;
 
@@ -228,6 +242,24 @@ function generateInterface(filePath: string, type: 'entity' | 'dto'): string {
       });
 
       result.push(`export interface ${className} {\n${properties.join('\n')}\n}`);
+    }
+    // 处理 interface 声明
+    else if (ts.isInterfaceDeclaration(node) && node.name) {
+      const interfaceName = node.name.text;
+
+      const properties: string[] = [];
+      node.members.forEach((member) => {
+        if (ts.isPropertySignature(member) && member.name) {
+          const propName = (member.name as ts.Identifier).text;
+          const propType = member.type
+            ? printer.printNode(ts.EmitHint.Unspecified, member.type, sourceFile)
+            : 'any';
+          const optional = member.questionToken ? '?' : '';
+          properties.push(`  ${propName}${optional}: ${propType};`);
+        }
+      });
+
+      result.push(`export interface ${interfaceName} {\n${properties.join('\n')}\n}`);
     }
   });
 
@@ -309,7 +341,7 @@ export function generateApiClient(options: CodegenOptions = {}) {
 
   const exports: string[] = [];
   let entityFile = '';
-  let dtoFile = '';
+  const dtoFiles: string[] = [];
   
   // 统计
   let generated = 0;
@@ -354,7 +386,7 @@ export function generateApiClient(options: CodegenOptions = {}) {
           file,
         });
         exports.push(`export * from './${file.replace('.ts', '')}';`);
-        dtoFile = file;
+        dtoFiles.push(file);
       }
     }
   }
@@ -392,7 +424,7 @@ export function generateApiClient(options: CodegenOptions = {}) {
     } else {
       const info = parseController(task.srcPath);
       if (!info) continue;
-      code = generateControllerCode(info, entityFile, dtoFile);
+      code = generateControllerCode(info, entityFile);
     }
 
     // 智能写入（内容比对）
