@@ -1,6 +1,6 @@
 {
   "name": "@ai-partner-x/aiko-boot-create",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "CLI to create aiko-boot scaffold project (monorepo with api, admin, mobile, shared)",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,7 +19,9 @@
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "sync:templates:scaffold-default": "node ./scripts/sync-scaffold-default.mjs",
+    "sync:templates:scaffold-default:dry": "node ./scripts/sync-scaffold-default.mjs --dry-run"
   },
   "dependencies": {
     "commander": "^12.1.0",
@@ -32,5 +34,9 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
   }
 }
